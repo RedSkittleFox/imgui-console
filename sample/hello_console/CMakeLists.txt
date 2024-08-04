@@ -24,9 +24,9 @@ add_executable(
 if(MSVC)
     target_compile_options(
     	console-sample-hello-console
-	PRIVATE /W4 
-	PRIVATE /MP 
-	PRIVATE /arch:AVX2
+	    PRIVATE /W4 
+	    PRIVATE /MP 
+	    PRIVATE /arch:AVX2
 	# PRIVATE /WX
     )
 endif()
