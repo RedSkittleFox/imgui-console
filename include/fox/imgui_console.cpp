@@ -182,7 +182,30 @@ namespace fox::imgui
         }
     }
 
-    void draw_text(state& state, ImGuiWindow* window, ImGuiContext& g, const state::segment& s)
+    static float char_width(ImGuiContext& g, char c)
+    {
+        if (c == '\n' || !std::isprint(c))
+            return 0.0;
+
+        return g.Font->GetCharAdvance(c) * g.FontScale;
+    }
+
+    const char* locate_clicked_character(ImGuiContext& g, std::string_view sv, float x)
+    {
+        float sum = 0.0f;
+        std::size_t i = 0;
+        for (; i < std::size(sv); ++i)
+        {
+            sum += char_width(g, sv[i]);
+
+            if (x <= sum)
+                return std::data(sv) + i + (i + 1 != std::size(sv));
+        }
+
+        return nullptr;
+    }
+
+    void draw_text(state& state, ImGuiWindow* window, ImGuiContext& g, const state::segment& s, const char*& out_clicked_char)
     {
         if (std::empty(s.string))
             return;
@@ -193,7 +216,20 @@ namespace fox::imgui
         auto id = window->GetID(str, end);
         auto pos = ImGui::GetCursorScreenPos();
         auto size = ImGui::CalcTextSize(str, end);
+        ImRect bb_small({ pos.x, pos.y }, { pos.x + size.x, pos.y + size.y });
         ImRect bb({ pos.x, pos.y - g.Style.ItemSpacing.y }, { pos.x + size.x, pos.y + size.y + g.Style.ItemSpacing.y * 1 });
+
+        // Check if mouse is within rectangle
+        auto mouse_pos = ImGui::GetMousePos();
+        if(bb_small.Contains(mouse_pos))
+        {
+            auto c = locate_clicked_character(g, s.string, mouse_pos.x - pos.x);
+            if(c != nullptr)
+            {
+                assert(out_clicked_char == nullptr && "Only one char should be clickable.");
+                out_clicked_char = c;
+            }
+        }
 
         ImGui::PushStyleColor(ImGuiCol_Text, s.color);
         ImGui::TextUnformatted(str, end);
@@ -264,9 +300,7 @@ namespace fox::imgui
 
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1)); // Tighten spacing
 
-            ImGui::TextUnformatted("TestA\nTestB\nTestC");
-
-
+            const char* clicked_char = nullptr;
 
             ImGuiListClipper clipper;
             clipper.Begin(std::ssize(state.segments));
@@ -281,12 +315,12 @@ namespace fox::imgui
                         continue;
                     }
 
-                    draw_text(state, window, g, segment[0]);
+                    draw_text(state, window, g, segment[0], clicked_char);
 
                     for(std::size_t j = 1; j < std::size(segment); ++j)
                     {
                         ImGui::SameLine(0, 0.f);
-                        draw_text(state, window, g, segment[j]);
+                        draw_text(state, window, g, segment[j], clicked_char);
                     }
 				}
             }
@@ -298,8 +332,14 @@ namespace fox::imgui
             ScrollToBottom = false;
 
             ImGui::PopStyleVar();
+			if(clicked_char != nullptr && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+			{
+                state.selection_end = clicked_char;
+			}
         }
-        ImGui::EndChild();
+
+
+    	ImGui::EndChild();
         ImGui::Separator();
 
         auto callback = [](ImGuiInputTextCallbackData*) -> int
