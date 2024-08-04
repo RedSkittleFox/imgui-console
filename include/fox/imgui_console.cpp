@@ -42,11 +42,204 @@ namespace fox::imgui
     	return start + end_m + 2;
     }
 
-    void console_window(state& state, bool* open, const config& cfg)
+    void process_text(state& state)
     {
+        ImVec2 vMin = ImGui::GetWindowContentRegionMin();
+        ImVec2 vMax = ImGui::GetWindowContentRegionMax();
+        auto max_width = vMax.x - vMin.x - 15; // TODO: Scroll width
+
         constexpr std::string_view separateros{ "\n\t .,;?!" }; // TODO: Complete this list
         constexpr std::string_view spaces{ "\n\t " };
 
+        const char* beg = state.buffer.c_str();
+        const char* end = state.buffer.c_str() + std::size(state.buffer);
+
+        ImU32 color = ImGui::GetColorU32(ImGuiCol_Text);
+        const char* current = beg;
+
+        state.segments.clear();
+        state.segments.emplace_back();
+
+        bool next_inline = false;
+        float offset_size = 0.0f;
+        while (current < end)
+        {
+            float max_width_adjusted = std::max(max_width - (next_inline ? offset_size : 0), 5.f);
+
+            // Find potential line
+            const char* line_end1 = std::strstr(current, "{{");
+            if (current == line_end1)
+            {
+                current = default_color_parser(current, end, color);
+                next_inline = true;
+                continue;
+            }
+
+            const char* line_end2 = std::strchr(current, '\n');
+            const char* line_end;
+
+            if (line_end1 != nullptr && line_end2 != nullptr)
+            {
+                line_end = std::min(line_end1, line_end2);
+            }
+            else if (line_end1 != nullptr)
+            {
+                line_end = line_end1;
+            }
+            else
+            {
+                line_end = line_end2;
+            }
+
+            if (line_end == nullptr) [[unlikely]]
+                line_end = end;
+
+
+            // Check if it fits
+            auto size = ImGui::CalcTextSize(current, line_end);
+            auto og_size = size;
+
+            auto push = [&]()
+                {
+                    if (next_inline) [[unlikely]]
+                        {
+                            state.segments.back().emplace_back(state::segment{ std::string_view(current, line_end - current), color });
+                            next_inline = false;
+                            offset_size = 0.0f;
+                        }
+                    else
+                    {
+                        state.segments.emplace_back(std::vector{ state::segment{ std::string_view(current, line_end - current), color } });
+                    }
+                    offset_size = size.x;
+                };
+
+            if (size.x <= max_width_adjusted)
+            {
+                push();
+
+                current = line_end + (line_end == line_end2);
+                continue;
+            }
+
+            // Otherwise split the line
+
+            // Make an educated guess where to split
+            std::size_t line_len = line_end - beg;
+            line_len = static_cast<std::size_t>(static_cast<float>(line_len) * max_width_adjusted / size.x);
+
+            // Try splitting by words
+            while (line_len > 1)
+            {
+                auto potential_line_len = std::string_view(current, line_len).find_last_of(separateros);
+                if (potential_line_len == std::string_view::npos)
+                {
+                    line_len = 0;
+                    break;
+                }
+
+                line_len = potential_line_len;
+                size = ImGui::CalcTextSize(current, current + line_len);
+
+                if (size.x <= max_width_adjusted)
+                    break;
+
+                line_len -= 1;
+            }
+
+            if (line_len != 0)
+            {
+                line_end = current + line_len;
+                push();
+                current = line_end;
+
+                // Trim white space in case of artificial new line
+                if (current < end && spaces.find(current[0]) != std::string_view::npos)
+                {
+                    current += 1;
+                }
+
+                continue;
+            }
+
+            // Otherwise brute force shrink
+            line_len = line_end - beg;
+            size = og_size;
+            line_len = static_cast<std::size_t>(static_cast<float>(line_len) * max_width_adjusted / size.x);
+            while (line_len > 1)
+            {
+                size = ImGui::CalcTextSize(current, current + line_len);
+
+                if (size.x <= max_width_adjusted)
+                    break;
+
+                line_len -= 1;
+            }
+
+            line_end = current + std::max(line_len, static_cast<std::size_t>(1));
+            push();
+            current = line_end;
+        }
+    }
+
+    void draw_text(state& state, ImGuiWindow* window, ImGuiContext& g, const state::segment& s)
+    {
+        if (std::empty(s.string))
+            return;
+
+        auto str = std::data(s.string);
+        auto end = std::data(s.string) + std::size(s.string);
+
+        auto id = window->GetID(str, end);
+        auto pos = ImGui::GetCursorScreenPos();
+        auto size = ImGui::CalcTextSize(str, end);
+        ImRect bb({ pos.x, pos.y - g.Style.ItemSpacing.y }, { pos.x + size.x, pos.y + size.y + g.Style.ItemSpacing.y * 1 });
+
+        ImGui::PushStyleColor(ImGuiCol_Text, s.color);
+        ImGui::TextUnformatted(str, end);
+        ImGui::PopStyleColor();
+
+        ImGui::ItemAdd(bb, id);
+        // ImGui::DebugDrawItemRect();
+
+        const bool hovered = ImGui::ItemHoverable(bb, id, g.LastItemData.InFlags);
+        if (hovered)
+            g.MouseCursor = ImGuiMouseCursor_TextInput;
+
+        // Check if selection should be rendered - check if we are within range
+        if (bool 
+				start_within = (state.selection_start <= str && str < state.selection_end),
+				end_within = (state.selection_start <= end - 1 && end - 1 < state.selection_end);
+            state.selection_start != nullptr && state.selection_end != nullptr && ( start_within || end_within))
+        {
+            ImU32 bg_color = ImGui::GetColorU32(ImGuiCol_TextSelectedBg, 0.6f);
+
+            // If only a subregion should be rendered
+            if (!(start_within && end_within))
+            {
+                if(start_within)
+                {
+                    size = ImGui::CalcTextSize(str, state.selection_end);
+                }
+                else
+                {
+                    size = ImGui::CalcTextSize(state.selection_start, end);
+                }
+            }
+
+            ImRect rect(pos, { pos.x + size.x, pos.y + size.y });
+            auto window_size = ImGui::GetContentRegionAvail();
+            auto window_pos = ImGui::GetWindowPos();
+            ImRect clip_rect = ImRect(window_pos, { window_pos.x + window_size.x, window_pos.y + window_size.y });
+
+            rect.ClipWith(clip_rect);
+            if (rect.Overlaps(clip_rect))
+                ImGui::GetWindowDrawList()->AddRectFilled(rect.Min, rect.Max, bg_color);
+        }
+    };
+
+    void console_window(state& state, bool* open, const config& cfg)
+    {
         ImGuiWindow* window = ImGui::GetCurrentWindow();
         ImGuiContext& g = *GImGui;
 
@@ -57,143 +250,10 @@ namespace fox::imgui
             return;
         }
 
-        ImVec2 vMin = ImGui::GetWindowContentRegionMin();
-        ImVec2 vMax = ImGui::GetWindowContentRegionMax();
-        auto max_width = vMax.x - vMin.x - 15; // TODO: Scroll width
         if(true) // Window width changed, preprocess word wrapping again
         {
-            const char* beg = state.buffer.c_str();
-            const char* end = state.buffer.c_str() + std::size(state.buffer);
-
-            ImU32 color = ImGui::GetColorU32(ImGuiCol_Text);
-            const char* current = beg;
-
-            state.segments.clear();
-            state.segments.emplace_back();
-
-            bool next_inline = false;
-            float offset_size = 0.0f;
-	        while(current < end)
-	        {
-                float max_width_adjusted = std::max(max_width - (next_inline ? offset_size : 0), 5.f);
-
-                // Find potential line
-                const char* line_end1 = std::strstr(current, "{{");
-                if(current == line_end1)
-                {
-                    current = default_color_parser(current, end, color);
-                    next_inline = true;
-                    continue;
-                }
-
-                const char* line_end2 = std::strchr(current, '\n');
-                const char* line_end;
-
-	        	if(line_end1 != nullptr && line_end2 != nullptr)
-                {
-					line_end = std::min(line_end1, line_end2);
-                }
-                else if(line_end1 != nullptr)
-                {
-                    line_end = line_end1;
-                }
-                else
-                {
-                    line_end = line_end2;
-                }
-
-                if (line_end == nullptr) [[unlikely]]
-                    line_end = end;
-
-
-	        	// Check if it fits
-	        	auto size = ImGui::CalcTextSize(current, line_end);
-                auto og_size = size;
-
-                auto push = [&]()
-				{
-					if (next_inline) [[unlikely]]
-					{
-						state.segments.back().emplace_back(state::segment{ std::string_view(current, line_end - current), color });
-                        next_inline = false;
-                        offset_size = 0.0f;
-					}
-                    else
-                    {
-                        state.segments.emplace_back(std::vector{ state::segment{ std::string_view(current, line_end - current), color } });
-                    }
-                    offset_size = size.x;
-				};
-
-                if(size.x <= max_width_adjusted)
-                {
-                    push();
-
-                    current = line_end + ( line_end == line_end2 );
-                    continue;
-                }
-
-                // Otherwise split the line
-
-                // Make an educated guess where to split
-                std::size_t line_len = line_end - beg;
-                line_len = static_cast<std::size_t>(static_cast<float>(line_len) * max_width_adjusted / size.x);
-
-                // Try splitting by words
-                while (line_len > 1)
-                {
-                	auto potential_line_len = std::string_view(current, line_len).find_last_of(separateros);
-                    if (potential_line_len == std::string_view::npos)
-                    {
-                        line_len = 0;
-                        break;
-                    }
-
-                    line_len = potential_line_len;
-                    size = ImGui::CalcTextSize(current, current + line_len);
-
-                    if (size.x <= max_width_adjusted)
-                        break;
-
-                    line_len -= 1;
-                }
-
-                if(line_len != 0)
-                {
-                    line_end = current + line_len;
-                    push();
-                    current = line_end;
-
-                    // Trim white space in case of artificial new line
-                    if(current < end && spaces.find(current[0]) != std::string_view::npos)
-                    {
-                        current += 1;
-                    }
-
-                    continue;
-                }
-
-                // Otherwise brute force shrink
-                line_len = line_end - beg;
-                size = og_size;
-                line_len = static_cast<std::size_t>(static_cast<float>(line_len) * max_width_adjusted / size.x);
-	        	while(line_len > 1)
-                {
-                    size = ImGui::CalcTextSize(current, current + line_len);
-
-                    if (size.x <= max_width_adjusted)
-                        break;
-
-                    line_len -= 1;
-                }
-
-                line_end = current + std::max(line_len, static_cast<std::size_t>(1));
-                push();
-                current = line_end;
-	        }
+            process_text(state);
         }
-
-        auto font_size = g.FontSize;
 
         // Reserve enough left-over height for 1 separator + 1 input text
         const float footer_height_to_reserve = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
@@ -202,10 +262,11 @@ namespace fox::imgui
             bool ScrollToBottom = false;
             bool AutoScroll = false;
 
-
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1)); // Tighten spacing
 
             ImGui::TextUnformatted("TestA\nTestB\nTestC");
+
+
 
             ImGuiListClipper clipper;
             clipper.Begin(std::ssize(state.segments));
@@ -220,16 +281,12 @@ namespace fox::imgui
                         continue;
                     }
 
-                    ImGui::PushStyleColor(ImGuiCol_Text, segment[0].color);
-                    ImGui::TextUnformatted(std::data(segment[0].string), std::data(segment[0].string) + std::size(segment[0].string));
-                    ImGui::PopStyleColor();
+                    draw_text(state, window, g, segment[0]);
 
                     for(std::size_t j = 1; j < std::size(segment); ++j)
                     {
                         ImGui::SameLine(0, 0.f);
-                        ImGui::PushStyleColor(ImGuiCol_Text, segment[j].color);
-						ImGui::TextUnformatted(std::data(segment[j].string), std::data(segment[j].string) + std::size(segment[j].string));
-                        ImGui::PopStyleColor();
+                        draw_text(state, window, g, segment[j]);
                     }
 				}
             }

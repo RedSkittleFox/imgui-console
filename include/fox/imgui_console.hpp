@@ -36,6 +36,9 @@ In porta enim in ex pulvinar semper. Mauris efficitur vitae arcu et commodo. Nul
         };
 
         std::vector<std::vector<segment>> segments;
+
+        const char* selection_start = std::data(buffer);
+        const char* selection_end = std::data(buffer) + 500;
     };
 
     void console_window(state& state, bool* open = nullptr, const config& cfg = config());
