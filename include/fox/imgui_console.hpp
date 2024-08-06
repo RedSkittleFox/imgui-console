@@ -35,6 +35,9 @@ In porta enim in ex pulvinar semper. Mauris efficitur vitae arcu et commodo. Nul
             ImU32 color;
         };
 
+        bool word_wrapping = true;
+
+        bool valid_dragging = false;
         std::vector<std::vector<segment>> segments;
 
         const char* selection_start = std::data(buffer);
