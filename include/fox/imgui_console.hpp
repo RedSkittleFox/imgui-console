@@ -3,22 +3,40 @@
 #pragma once
 
 #include "imgui.h"
+#include "imgui_internal.h"
 
 #include <vector>
 #include <string>
 #include <array>
+#include <string_view>
 
 namespace fox::imgui
 {
-    struct config
+    class console_window
     {
-        const char* window_name = "Console Window";
-    };
+        struct config
+        {
+            const char* window_name = "Console Window";
+        } config_;
 
-    struct state
-    {
-        std::array<char, 128> input_buffer;
-        std::string buffer = R"(Lorem ipsum dolor sit amet, consectetur adipiscing elit. Donec commodo nec sem id interdum. Pellentesque dictum neque ligula, vitae aliquet lacus consectetur at. Ut efficitur ornare lectus vel vehicula. Integer lorem turpis, convallis vel orci et, efficitur varius tortor. Cras accumsan mattis orci non convallis. Morbi massa ligula, efficitur sit amet mi id, iaculis congue erat. Aliquam nec urna ut libero sollicitudin aliquet et a libero. Fusce metus lectus, porta nec risus quis, condimentum vulputate ipsum. Sed hendrerit ex id ornare ultrices. Sed gravida finibus congue. Proin congue hendrerit ex pulvinar dignissim. Morbi nec mauris quis lacus mattis sollicitudin et quis leo. Curabitur nec tempor lacus.
+        struct frame_state
+        {
+            ImVec2 mouse_pos;
+            ImRect text_region_clip;
+
+            // Rows visible during this frame
+        	int visible_row_min;
+            int visible_row_max;
+
+            // Last clicked char
+            const char* clicked_char;
+            std::ptrdiff_t clicked_segment;
+            std::ptrdiff_t clicked_subsegment;
+
+        } frame_state_;
+
+        std::array<char, 128> input_buffer_;
+        std::string buffer_ = R"(Lorem ipsum dolor sit amet, consectetur adipiscing elit. Donec commodo nec sem id interdum. Pellentesque dictum neque ligula, vitae aliquet lacus consectetur at. Ut efficitur ornare lectus vel vehicula. Integer lorem turpis, convallis vel orci et, efficitur varius tortor. Cras accumsan mattis orci non convallis. Morbi massa ligula, efficitur sit amet mi id, iaculis congue erat. Aliquam nec urna ut libero sollicitudin aliquet et a libero. Fusce metus lectus, porta nec risus quis, condimentum vulputate ipsum. Sed hendrerit ex id ornare ultrices. Sed gravida finibus congue. Proin congue hendrerit ex pulvinar dignissim. Morbi nec mauris quis lacus mattis sollicitudin et quis leo. Curabitur nec tempor lacus.
 
 Duis lobortis, nisl ut feugiat efficitur, odio arcu porttitor mauris, vitae posuere {{0;255;0}}dupadupadupa tellus. Duis congue eleifend quam, placerat sagittis lorem hendrerit in. Quisque mollis tellus ipsum, quis iaculis metus rutrum eu. Integer lobortis aliquam elit. Donec hendrerit sit amet sem pharetra pulvinar. Nam quis efficitur erat, eu pharetra turpis. Donec eleifend lectus vel lacus mattis, ut cursus mauris auctor. Quisque condimentum risus at sem dapibus, vel gravida ex sagittis. Nulla nec mauris nec ex condimentum accumsan. Integer euismod ultricies leo sed tincidunt. Curabitur malesuada, nisi id venenatis tristique, libero lorem porta magna, quis imperdiet leo tellus non sapien. Cras sodales feugiat turpis in ultricies.
 
@@ -35,16 +53,34 @@ In porta enim in ex pulvinar semper. Mauris efficitur vitae arcu et commodo. Nul
             ImU32 color;
         };
 
-        bool word_wrapping = true;
+        bool word_wrapping_ = true;
 
-        bool valid_dragging = false;
-        std::vector<std::vector<segment>> segments;
+        bool valid_dragging_ = false;
+        std::vector<std::vector<segment>> segments_;
 
-        const char* selection_start = std::data(buffer);
-        const char* selection_end = std::data(buffer) + 500;
+        bool disable_selection_ = false;
+        const char* selection_start_ = nullptr;
+        const char* selection_end_ = nullptr;
+
+        float mouse_scroll_boundary_ = 50.f;
+        float mouse_scroll_speed_ = 20.f;
+
+        bool search_popup_ = true;
+
+        std::array<char, 32> search_input_;
+
+    public:
+        void draw(bool* open);
+
+    private:
+        void draw_menus();
+        void draw_text_region(float footer_height_to_reserve);
+        void draw_text_subsegment(std::ptrdiff_t segment, std::ptrdiff_t subsegment);
+
+        void text_box_autoscroll();
+        void handle_selection();
+        void process_text();
     };
-
-    void console_window(state& state, bool* open = nullptr, const config& cfg = config());
 }
 
 #endif

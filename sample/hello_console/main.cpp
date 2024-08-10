@@ -10,8 +10,8 @@ namespace ImGuiSample
 	void update_sample_window(bool* is_open)
 	{
 		(void)is_open;
-		static fox::imgui::state state;
+		static fox::imgui::console_window wnd;
 
-		fox::imgui::console_window(state);
+		wnd.draw(nullptr);
 	}
 }
