@@ -3,7 +3,6 @@
 #pragma once
 
 #include "imgui.h"
-#include "imgui_internal.h"
 
 #include <vector>
 #include <string>
@@ -14,6 +13,8 @@ namespace fox::imgui
 {
     class console_window
     {
+        friend struct segment_pointer_comp;
+
         struct config
         {
             const char* window_name = "Console Window";
@@ -22,7 +23,8 @@ namespace fox::imgui
         struct frame_state
         {
             ImVec2 mouse_pos;
-            ImRect text_region_clip;
+            ImVec2 text_region_clip_min;
+            ImVec2 text_region_clip_max;
 
             // Rows visible during this frame
         	int visible_row_min;
@@ -32,6 +34,39 @@ namespace fox::imgui
             const char* clicked_char;
             std::ptrdiff_t clicked_segment;
             std::ptrdiff_t clicked_subsegment;
+
+            bool disable_selection_next_frame = false;;
+            bool disable_selection;
+
+            bool search_apply;
+            bool search_next;
+            bool search_previous;
+            bool search_center_view;
+
+            float scroll_next_frame = -1.f;
+            float scroll_this_frame;
+
+            void clear()
+            {
+                mouse_pos = ImVec2(0, 0);
+                text_region_clip_min = ImVec2(0, 0);
+                text_region_clip_max = ImVec2(0, 0);
+
+                clicked_char = nullptr;
+                clicked_segment = std::numeric_limits<std::ptrdiff_t>::max();
+                clicked_subsegment = std::numeric_limits<std::ptrdiff_t>::max();
+
+                disable_selection = disable_selection_next_frame;
+                disable_selection_next_frame = false;
+
+                search_apply = false;
+                search_next = false;
+                search_previous = false;
+                search_center_view = false;
+
+                scroll_this_frame = scroll_next_frame;
+                scroll_next_frame = -1.f;
+            }
 
         } frame_state_;
 
@@ -58,28 +93,41 @@ In porta enim in ex pulvinar semper. Mauris efficitur vitae arcu et commodo. Nul
         bool valid_dragging_ = false;
         std::vector<std::vector<segment>> segments_;
 
-        bool disable_selection_ = false;
         const char* selection_start_ = nullptr;
         const char* selection_end_ = nullptr;
 
         float mouse_scroll_boundary_ = 50.f;
         float mouse_scroll_speed_ = 20.f;
 
-        bool search_popup_ = true;
+        bool search_draw_popup_ = true;
+        bool search_draw_popup_properties_ = false;
+        bool search_match_casing_ = false;
+        bool search_whole_word_ = false;
+        bool search_regex_ = false;
 
-        std::array<char, 32> search_input_;
+        std::vector<std::string_view> search_found_;
+        std::string_view search_selected_;
+        std::array<char, 32> search_input_ {};
 
     public:
         void draw(bool* open);
 
     private:
         void draw_menus();
+        void draw_search_popup();
+        void draw_search_popup_properties();
+
         void draw_text_region(float footer_height_to_reserve);
         void draw_text_subsegment(std::ptrdiff_t segment, std::ptrdiff_t subsegment);
+        void draw_text_process_text();
+        void draw_selection(ImU32 bg_color, const char* beg, const char* end, const char* sel_beg, const char* sel_end, ImVec2 pos, ImVec2 size);
+        void draw_text_autoscroll();
 
-        void text_box_autoscroll();
         void handle_selection();
-        void process_text();
+        void apply_search();
+        void apply_search_segment_range(std::ptrdiff_t segment_start, std::ptrdiff_t segment_end);
+
+        std::ptrdiff_t find_segment_from_pointer(const char* str);
     };
 }
 

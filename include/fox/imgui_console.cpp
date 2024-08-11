@@ -9,38 +9,35 @@
 #include <string>
 #include <array>
 #include <algorithm>
-
+#include <regex>
 
 namespace fox::imgui
 {
 	const char* default_color_parser(const char* start, const char* end, ImU32& color)
 	{
-		if (start >= end) [[unlikely]]
+		if (start >= end)
 			return end;
 
-			int r = 0, g = 0, b = 0;
-			auto result = std::sscanf(start, "{{%i;%i;%i}}", &r, &g, &b);
+		int r = 0, g = 0, b = 0;
+		auto result = std::sscanf(start, "{{%i;%i;%i}}", &r, &g, &b);
 
-			const auto end_m = std::string_view(start, end - start).find("}}");
+		const auto end_m = std::string_view(start, end - start).find("}}");
 
-			if (result == EOF || start + result > end)
-			{
-				if (end_m == std::string_view::npos)
-					return end;
-
-				return start + end_m + 2;
-			}
-
-			color = ImGui::ColorConvertFloat4ToU32(ImColor(r, g, b));
+		if (result == EOF || start + result > end)
+		{
+			if (end_m == std::string_view::npos)
+				return end;
 
 			return start + end_m + 2;
+		}
+
+		color = ImGui::ColorConvertFloat4ToU32(ImColor(r, g, b));
+
+		return start + end_m + 2;
 	}
 
 	static float char_width(char c)
 	{
-		ImGuiContext& g = *GImGui;
-		// auto g = ImGui::GetCurrentContext();
-
 		if (c == '\n' || !std::isprint(c))
 			return 0.0;
 
@@ -64,8 +61,7 @@ namespace fox::imgui
 
 	void console_window::draw(bool* open)
 	{
-		ImGuiWindow* window = ImGui::GetCurrentWindow();
-		ImGuiContext* g = ImGui::GetCurrentContext();
+		frame_state_.clear();
 
 		ImGui::SetNextWindowSize(ImVec2(520, 600), ImGuiCond_FirstUseEver);
 		if (!ImGui::Begin(config_.window_name, open, ImGuiWindowFlags_MenuBar))
@@ -80,7 +76,13 @@ namespace fox::imgui
 
 		// Reserve enough left-over height for 1 separator + 1 input text
 		const float footer_height_to_reserve = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
+
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1)); // Tighten spacing
 		draw_text_region(footer_height_to_reserve);
+
+		// Make sure this is within the style, we calculate the text height in there
+		handle_selection();
+		ImGui::PopStyleVar();
 
 		ImGui::Separator();
 
@@ -104,6 +106,10 @@ namespace fox::imgui
 		if (reclaim_focus)
 			ImGui::SetKeyboardFocusHere(-1); // Auto focus previous widget
 
+		draw_search_popup();
+
+		apply_search();
+
 		ImGui::End();
 
 		(void)open;
@@ -111,18 +117,18 @@ namespace fox::imgui
 
 	void console_window::draw_menus()
 	{
-		bool open_search_popup = false;
 		if (ImGui::BeginMenuBar())
 		{
-			disable_selection_ = false;
+			frame_state_.disable_selection = frame_state_.disable_selection_next_frame;
+			frame_state_.disable_selection_next_frame = false;
 
 			if (ImGui::BeginMenu("Edit"))
 			{
-				disable_selection_ = true;
+				frame_state_.disable_selection = true;
 
 				if (ImGui::MenuItem("Find", "CTRL+F"))
 				{
-					open_search_popup = true;
+					search_draw_popup_ = true;
 				}
 
 				if (ImGui::MenuItem("Select All", "CTRL+A"))
@@ -145,7 +151,7 @@ namespace fox::imgui
 
 			if (ImGui::BeginMenu("View"))
 			{
-				disable_selection_ = true;
+				frame_state_.disable_selection = true;
 
 				if (ImGui::Checkbox("Wrap", std::addressof(word_wrapping_)))
 				{
@@ -162,73 +168,92 @@ namespace fox::imgui
 
 			ImGui::EndMenuBar();
 		}
+	}
 
-		if (open_search_popup)
-			ImGui::OpenPopup("search_popup", ImGuiPopupFlags_None);
+	void console_window::draw_search_popup()
+	{
+		ImRect text_region_clip(frame_state_.text_region_clip_min, frame_state_.text_region_clip_max);
+
+		if (search_draw_popup_ == false)
+			return;
 
 		// Search Popup
-		const auto search_popup_size = ImVec2(300.f, ImGui::GetTextLineHeightWithSpacing() * 2);
-		const auto search_popup_pos = ImGui::GetCursorScreenPos() + ImVec2(ImGui::GetContentRegionAvail().x - search_popup_size.x, 0);
-		if (ImGui::IsPopupOpen("search_popup"))
+		const auto search_popup_size = ImVec2(300.f,
+			ImGui::GetStyle().WindowPadding.y * 2 +
+			ImGui::GetTextLineHeight() * (1 + search_draw_popup_properties_) +
+			(ImGui::GetStyle().ItemSpacing.y) * (2 + search_draw_popup_properties_)
+		);
+
+		const auto search_popup_pos = ImVec2(text_region_clip.Max.x - search_popup_size.x, text_region_clip.Min.y);
+		ImRect popup_rect(search_popup_pos, search_popup_pos + search_popup_size);
+		ImGui::SetNextWindowPos(search_popup_pos, ImGuiCond_Always);
+		ImGui::SetNextWindowSize(search_popup_size, ImGuiCond_Always);
+
+		if (!ImGui::BeginChild("search_popup", search_popup_size, true,
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoDecoration)
+			)
 		{
-			ImGui::SetNextWindowPos(search_popup_pos);
-			ImGui::SetNextWindowSize(search_popup_size, ImGuiCond_Always);
+			ImGui::EndChild();
+			return;
 		}
 
-		if (ImGui::BeginPopup("search_popup", ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDecoration))
+		// If mouse within window disable selection
+		if (popup_rect.Contains(frame_state_.mouse_pos))
 		{
-			const auto button_size = ImGui::GetFrameHeight();
-			const auto x_spacing = ImGui::GetStyle().ItemSpacing.x;
-
-			auto text_size = search_popup_size.x - button_size * 3.33 - 6 * x_spacing;
-
-			bool open_search_properties_popup = false;
-			if (ImGui::Button(" ##options_button", ImVec2(button_size / 3, button_size)))
-			{
-				open_search_properties_popup = true;
-			}
-
-			if (open_search_properties_popup)
-				ImGui::OpenPopup("search_properties_popup", ImGuiPopupFlags_None);
-
-			// Search Popup
-			if (ImGui::IsPopupOpen("search_properties_popup"))
-			{
-				ImGui::SetNextWindowPos(search_popup_pos + ImVec2(0, search_popup_size.y));
-				ImGui::SetNextWindowSize(search_popup_size, ImGuiCond_Always);
-			}
-
-			if (ImGui::BeginPopup("search_properties_popup", ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDecoration))
-			{
-				ImGui::RadioButton("Match Word", false);
-				ImGui::SameLine();
-				ImGui::RadioButton("Match Casing", false);
-				ImGui::SameLine();
-				ImGui::RadioButton("Regex", false);
-
-				ImGui::EndPopup();
-			}
-
-			ImGui::SameLine();
-			ImGui::SetNextItemWidth(text_size);
-			ImGui::InputText("##Search Box", std::data(search_input_), std::size(search_input_));
-			ImGui::SameLine();
-			if (ImGui::ArrowButton("FindPrev", ImGuiDir_Up))
-			{
-
-			}
-			ImGui::SameLine();
-			if (ImGui::ArrowButton("FindNExt", ImGuiDir_Down))
-			{
-
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("X", ImVec2(button_size, button_size)))
-			{
-
-			}
-			ImGui::EndPopup();
+			frame_state_.disable_selection_next_frame = true;
 		}
+
+		// Draw black background (default is transparent)
+		{
+			auto bg_color = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+			ImGui::GetWindowDrawList()->AddRectFilled(popup_rect.Min, popup_rect.Max, ImGui::ColorConvertFloat4ToU32(bg_color));
+		}
+
+		const auto button_size = ImGui::GetFrameHeight();
+		const auto x_spacing = ImGui::GetStyle().ItemSpacing.x;
+
+		auto text_size = search_popup_size.x - button_size * 4 - 6 * x_spacing;
+
+		if (ImGui::ArrowButton("Advanced Search", search_draw_popup_properties_ ? ImGuiDir_Up : ImGuiDir_Down))
+		{
+			search_draw_popup_properties_ = !search_draw_popup_properties_;
+		}
+
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(static_cast<float>(text_size));
+		ImGui::InputText("##Search Box", std::data(search_input_), std::size(search_input_));
+		ImGui::SameLine();
+		if (ImGui::ArrowButton("FindPrev", ImGuiDir_Up))
+		{
+			frame_state_.search_previous = true;
+			frame_state_.search_apply = true;
+		}
+		ImGui::SameLine();
+		if (ImGui::ArrowButton("FindNext", ImGuiDir_Down))
+		{
+			frame_state_.search_next = true;
+			frame_state_.search_apply = true;
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("X", ImVec2(button_size, button_size)))
+		{
+			search_draw_popup_ = false;
+		}
+
+		if (search_draw_popup_properties_)
+		{
+			if (ImGui::Checkbox("Match Word", &search_whole_word_)) frame_state_.search_apply = true;
+			ImGui::SameLine();
+			if (ImGui::Checkbox("Match Casing", &search_match_casing_)) frame_state_.search_apply = true;
+			ImGui::SameLine();
+			if (ImGui::Checkbox("Regex", &search_regex_)) frame_state_.search_apply = true;
+		}
+
+		ImGui::EndChild();
+	}
+
+	void console_window::draw_search_popup_properties()
+	{
 	}
 
 	void console_window::draw_text_region(float footer_height_to_reserve)
@@ -239,23 +264,28 @@ namespace fox::imgui
 			return;
 		}
 
-		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1)); // Tighten spacing
-
 		ImGuiID id = ImGui::GetCurrentWindow()->GetID("ScrollingRegion");
 		auto scroll = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
 
-		frame_state_.text_region_clip = ImRect(ImGui::GetCursorScreenPos() + scroll, ImGui::GetCursorScreenPos() + ImGui::GetContentRegionAvail() + scroll);
+		frame_state_.text_region_clip_min = ImGui::GetCursorScreenPos() + scroll;
+		frame_state_.text_region_clip_max = ImGui::GetCursorScreenPos() + ImGui::GetContentRegionAvail() + scroll;
+		ImRect text_region_clip(frame_state_.text_region_clip_min, frame_state_.text_region_clip_max);
+		ImGui::GetWindowDrawList()->AddRect(text_region_clip.Min, text_region_clip.Max, ImGui::ColorConvertFloat4ToU32(ImVec4{ 1.f, 1.f, 0.f, 1.f }));
 
-		ImGui::GetWindowDrawList()->AddRect(frame_state_.text_region_clip.Min, frame_state_.text_region_clip.Max, ImGui::ColorConvertFloat4ToU32(ImVec4{ 1.f, 1.f, 0.f, 1.f }));
-
-		if (frame_state_.text_region_clip.Contains(ImGui::GetMousePos()) && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::GetCurrentContext()->ActiveId == id)
+		if (text_region_clip.Contains(ImGui::GetMousePos()) && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::GetCurrentContext()->ActiveId == id)
 		{
 			ImGui::SetKeyOwner(ImGuiKey_MouseLeft, id);
 		}
 
+		// Scroll in the window
+		if(frame_state_.scroll_this_frame >= 0.0f)
+		{
+			ImGui::SetScrollY(ImGui::GetScrollMaxY() * frame_state_.scroll_this_frame);
+		}
+
 		// These two require frame_state_.text_region_clip to be processed
-		process_text();
-		text_box_autoscroll();
+		draw_text_process_text();
+		draw_text_autoscroll();
 
 		bool ScrollToBottom = false;
 		bool AutoScroll = false;
@@ -272,16 +302,19 @@ namespace fox::imgui
 		clipper.Begin(static_cast<int>(std::ssize(segments_)), ImGui::GetTextLineHeight());
 		while (clipper.Step())
 		{
+			frame_state_.visible_row_min = std::min(frame_state_.visible_row_min, clipper.DisplayStart);
+			frame_state_.visible_row_max = std::max(frame_state_.visible_row_max, clipper.DisplayEnd);
+
 			for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
 			{
-				frame_state_.visible_row_min = std::min(frame_state_.visible_row_min, i);
-				frame_state_.visible_row_max = std::max(frame_state_.visible_row_max, i);
-
 				const auto& segment = segments_[i];
 				assert(!std::empty(segment));
 
-				for (std::ptrdiff_t j = 0; j < std::ssize(segment); ++j)
+				draw_text_subsegment(i, 0);
+
+				for (std::ptrdiff_t j = 1; j < std::ssize(segment); ++j)
 				{
+					ImGui::SameLine(0, 0);
 					draw_text_subsegment(i, j);
 				}
 			}
@@ -294,15 +327,13 @@ namespace fox::imgui
 			ImGui::SetScrollHereY(1.0f);
 		ScrollToBottom = false;
 
-		// Make sure this is within the style, we calculate the text height in there
-		handle_selection();
-
-		ImGui::PopStyleVar();
 		ImGui::EndChild();
 	}
 
 	void console_window::draw_text_subsegment(std::ptrdiff_t segment, std::ptrdiff_t subsegment)
 	{
+		ImRect text_region_clip(frame_state_.text_region_clip_min, frame_state_.text_region_clip_max);
+
 		auto string = segments_[segment][subsegment].string;
 		auto color = segments_[segment][subsegment].color;
 
@@ -319,11 +350,11 @@ namespace fox::imgui
 		auto pos = ImGui::GetCursorScreenPos();
 		auto size = ImGui::CalcTextSize(beg, end);
 
-		ImRect bb(ImVec2(frame_state_.text_region_clip.Min.x, pos.y), ImVec2(frame_state_.text_region_clip.Max.x, size.y + pos.y + g->Style.ItemInnerSpacing.y));
+		ImRect bb(ImVec2(text_region_clip.Min.x, pos.y), ImVec2(text_region_clip.Max.x, size.y + pos.y + g->Style.ItemInnerSpacing.y));
 
 		// Check if mouse is within rectangle
 		auto mouse_pos = ImGui::GetMousePos();
-		if (disable_selection_ == false && ImGui::IsMouseDown(ImGuiMouseButton_Left) && frame_state_.text_region_clip.Contains(mouse_pos) && bb.Contains(mouse_pos))
+		if (frame_state_.disable_selection == false && ImGui::IsMouseDown(ImGuiMouseButton_Left) && text_region_clip.Contains(mouse_pos) && bb.Contains(mouse_pos))
 		{
 			ImRect text_bb(pos, pos + size + ImVec2(0, g->Style.ItemSpacing.y));
 
@@ -357,92 +388,114 @@ namespace fox::imgui
 		if (ImGui::ItemHoverable(bb, id, g->LastItemData.InFlags))
 			g->MouseCursor = ImGuiMouseCursor_TextInput;
 
-		// Check if selection should be rendered - check if we are within range
-		if (auto [selection_start, selection_end] = std::minmax(selection_start_, selection_end_);
-			selection_start != nullptr && selection_end != nullptr && (beg < selection_end || selection_start <= end - 1))
+		draw_selection(ImGui::GetColorU32(ImGuiCol_TextSelectedBg, 0.6f), beg, end, selection_start_, selection_end_, pos, size);
+
+		auto found_color = ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 1.f, 0.6f));
+		for(const auto& found : search_found_)
 		{
-			ImU32 bg_color = ImGui::GetColorU32(ImGuiCol_TextSelectedBg, 0.6f);
+			if (found == search_selected_)
+				continue;
 
-			// If only a subregion should be rendered
-
-			float segment_begin_selection_offset = 0.f;
-
-			bool start_within = beg < selection_start;
-			bool ends_within = selection_end < end;
-
-			if (start_within && ends_within)
-			{
-				size = ImGui::CalcTextSize(selection_start, selection_end);
-				segment_begin_selection_offset = ImGui::CalcTextSize(beg, selection_start).x;
-			}
-			else if (start_within)
-			{
-				size = ImGui::CalcTextSize(selection_start, end);
-				segment_begin_selection_offset = ImGui::CalcTextSize(beg, selection_start).x;
-			}
-			else if (ends_within)
-			{
-				size = ImGui::CalcTextSize(beg, selection_end);
-			}
-
-			ImRect rect(pos + ImVec2(segment_begin_selection_offset, 0.f), pos + size + ImVec2(segment_begin_selection_offset, 0.f));
-
-			rect.ClipWith(frame_state_.text_region_clip);
-			if (rect.Overlaps(frame_state_.text_region_clip))
-				ImGui::GetWindowDrawList()->AddRectFilled(rect.Min, rect.Max, bg_color);
+			draw_selection(found_color, beg, end, std::data(found), std::data(found) + std::size(found), pos, size);
 		}
+
+		draw_selection(ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 0.f, 0.6f)), beg, end, std::data(search_selected_), std::data(search_selected_) + std::size(search_selected_), pos, size);
 	}
 
-	void console_window::text_box_autoscroll()
+	void console_window::draw_selection(ImU32 bg_color, const char* beg, const char* end, const char* sel_beg, const char* sel_end, ImVec2 pos, ImVec2 size)
 	{
-		// Handle mouse scrolling
-		if (ImGui::IsMouseDragging(ImGuiMouseButton_Left) && valid_dragging_)
+		ImRect text_region_clip(frame_state_.text_region_clip_min, frame_state_.text_region_clip_max);
+
+		// Check if selection should be rendered - check if we are within range
+		auto [selection_start, selection_end] = std::minmax(sel_beg, sel_end);
+		if (selection_start == nullptr || selection_end == nullptr || (beg >= selection_end && selection_start > end - 1))
 		{
-			assert(mouse_scroll_speed_ > 0.0f && "Scroll speed must be greater than zero.");
-			assert(mouse_scroll_boundary_ > 0.0f && "Scroll boundary must be greater than zero.");
+			return;
+		}
 
-			const auto mouse_pos = frame_state_.mouse_pos;
+		float segment_begin_selection_offset = 0.f;
 
-			// Check mouse distance from borders
-			auto dist_left = mouse_pos.x - mouse_scroll_boundary_ - frame_state_.text_region_clip.Min.x;
-			auto dist_right = frame_state_.text_region_clip.Max.x - mouse_scroll_boundary_ - mouse_pos.x;
-			auto dist_top = mouse_pos.y - mouse_scroll_boundary_ - frame_state_.text_region_clip.Min.y;
-			auto dist_bottom = frame_state_.text_region_clip.Max.y - mouse_pos.y - mouse_scroll_boundary_;
+		bool start_within = beg < selection_start;
+		bool ends_within = selection_end < end;
 
-			if (dist_left <= 0.f)
-			{
-				auto scroll = ImGui::GetScrollX();
-				float f = std::clamp(std::abs(dist_left) / mouse_scroll_boundary_, 0.f, 1.f);
-				scroll -= f * f * mouse_scroll_speed_;
-				ImGui::SetScrollX(std::clamp(scroll, 0.f, ImGui::GetScrollMaxX()));
-			}
-			else if (dist_right <= 0.f)
-			{
-				auto scroll = ImGui::GetScrollX();
-				float f = std::clamp(std::abs(dist_right) / mouse_scroll_boundary_, 0.f, 1.f);
-				scroll += f * f * mouse_scroll_speed_;
-				ImGui::SetScrollX(std::clamp(scroll, 0.f, ImGui::GetScrollMaxX()));
-			}
+		if (start_within && ends_within)
+		{
+			size = ImGui::CalcTextSize(selection_start, selection_end);
+			segment_begin_selection_offset = ImGui::CalcTextSize(beg, selection_start).x;
+		}
+		else if (start_within)
+		{
+			size = ImGui::CalcTextSize(selection_start, end);
+			segment_begin_selection_offset = ImGui::CalcTextSize(beg, selection_start).x;
+		}
+		else if (ends_within)
+		{
+			size = ImGui::CalcTextSize(beg, selection_end);
+		}
 
-			if (dist_top <= 0.f)
-			{
-				auto scroll = ImGui::GetScrollY();
-				float f = std::clamp(std::abs(dist_top) / mouse_scroll_boundary_, 0.f, 1.f);
-				scroll -= f * f * mouse_scroll_speed_;
-				ImGui::SetScrollY(std::clamp(scroll, 0.f, ImGui::GetScrollMaxY()));
-			}
-			else if (dist_bottom <= 0.f)
-			{
-				auto scroll = ImGui::GetScrollY();
-				float f = std::clamp(std::abs(dist_bottom) / mouse_scroll_boundary_, 0.f, 1.f);
-				scroll += f * mouse_scroll_speed_;
-				ImGui::SetScrollY(std::clamp(scroll, 0.f, ImGui::GetScrollMaxY()));
-			}
+		ImRect rect(pos + ImVec2(segment_begin_selection_offset, 0.f), pos + size + ImVec2(segment_begin_selection_offset, 0.f));
+
+		rect.ClipWith(text_region_clip);
+		if (rect.Overlaps(text_region_clip))
+			ImGui::GetWindowDrawList()->AddRectFilled(rect.Min, rect.Max, bg_color);
+	}
+
+	void console_window::draw_text_autoscroll()
+	{
+		ImRect text_region_clip(frame_state_.text_region_clip_min, frame_state_.text_region_clip_max);
+
+		// Handle mouse scrolling
+		if (!(ImGui::IsMouseDragging(ImGuiMouseButton_Left) && valid_dragging_))
+		{
+			return;
+		}
+
+		assert(mouse_scroll_speed_ > 0.0f && "Scroll speed must be greater than zero.");
+		assert(mouse_scroll_boundary_ > 0.0f && "Scroll boundary must be greater than zero.");
+
+		const auto mouse_pos = frame_state_.mouse_pos;
+
+		// Check mouse distance from borders
+		auto dist_left = mouse_pos.x - mouse_scroll_boundary_ - text_region_clip.Min.x;
+		auto dist_right = text_region_clip.Max.x - mouse_scroll_boundary_ - mouse_pos.x;
+		auto dist_top = mouse_pos.y - mouse_scroll_boundary_ - text_region_clip.Min.y;
+		auto dist_bottom = text_region_clip.Max.y - mouse_pos.y - mouse_scroll_boundary_;
+
+		if (dist_left <= 0.f)
+		{
+			auto scroll = ImGui::GetScrollX();
+			float f = std::clamp(std::abs(dist_left) / mouse_scroll_boundary_, 0.f, 1.f);
+			scroll -= f * f * mouse_scroll_speed_;
+			ImGui::SetScrollX(std::clamp(scroll, 0.f, ImGui::GetScrollMaxX()));
+		}
+		else if (dist_right <= 0.f)
+		{
+			auto scroll = ImGui::GetScrollX();
+			float f = std::clamp(std::abs(dist_right) / mouse_scroll_boundary_, 0.f, 1.f);
+			scroll += f * f * mouse_scroll_speed_;
+			ImGui::SetScrollX(std::clamp(scroll, 0.f, ImGui::GetScrollMaxX()));
+		}
+
+		if (dist_top <= 0.f)
+		{
+			auto scroll = ImGui::GetScrollY();
+			float f = std::clamp(std::abs(dist_top) / mouse_scroll_boundary_, 0.f, 1.f);
+			scroll -= f * f * mouse_scroll_speed_;
+			ImGui::SetScrollY(std::clamp(scroll, 0.f, ImGui::GetScrollMaxY()));
+		}
+		else if (dist_bottom <= 0.f)
+		{
+			auto scroll = ImGui::GetScrollY();
+			float f = std::clamp(std::abs(dist_bottom) / mouse_scroll_boundary_, 0.f, 1.f);
+			scroll += f * mouse_scroll_speed_;
+			ImGui::SetScrollY(std::clamp(scroll, 0.f, ImGui::GetScrollMaxY()));
 		}
 	}
 
 	void console_window::handle_selection()
 	{
+		ImRect text_region_clip(frame_state_.text_region_clip_min, frame_state_.text_region_clip_max);
+
 		// Reset dragging state
 		if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseDragging(ImGuiMouseButton_Left) && valid_dragging_)
 		{
@@ -457,13 +510,13 @@ namespace fox::imgui
 				const auto mouse_pos = ImGui::GetMousePos();
 
 				// Narrow text clipping
-				ImGui::GetWindowDrawList()->AddRect(frame_state_.text_region_clip.Min, frame_state_.text_region_clip.Max, ImGui::ColorConvertFloat4ToU32(ImVec4{ 1.f, 0.f, 0.f, 1.f }));
+				ImGui::GetWindowDrawList()->AddRect(text_region_clip.Min, text_region_clip.Max, ImGui::ColorConvertFloat4ToU32(ImVec4{ 1.f, 0.f, 0.f, 1.f }));
 
-				if (frame_state_.visible_row_min == 0 && frame_state_.text_region_clip.Min.y >= mouse_pos.y)
+				if (frame_state_.visible_row_min == 0 && text_region_clip.Min.y >= mouse_pos.y)
 				{
 					selection_end_ = segments_[frame_state_.visible_row_min].front().string.data();
 				}
-				else if (frame_state_.visible_row_max + 1 == std::ssize(segments_) && frame_state_.text_region_clip.Min.y < mouse_pos.y)
+				else if (frame_state_.visible_row_max + 1 == std::ssize(segments_) && text_region_clip.Min.y < mouse_pos.y)
 				{
 					const auto& sv = segments_[frame_state_.visible_row_max].back().string;
 					selection_end_ = std::data(sv) + std::size(sv);
@@ -517,9 +570,9 @@ namespace fox::imgui
 
 			exit_outer_1:
 
-				for (std::ptrdiff_t j = frame_state_.clicked_subsegment; j < std::size(segments_[frame_state_.clicked_segment]); ++j)
+				for (std::ptrdiff_t j = frame_state_.clicked_subsegment; j < std::ssize(segments_[frame_state_.clicked_segment]); ++j)
 				{
-					for (std::ptrdiff_t i = i_ch; i < std::size(segments_[frame_state_.clicked_segment][j].string); ++i)
+					for (std::ptrdiff_t i = i_ch; i < std::ssize(segments_[frame_state_.clicked_segment][j].string); ++i)
 					{
 						// Current character is invalid
 						if (select_char(segments_[frame_state_.clicked_segment][j].string[i]) == false)
@@ -558,9 +611,319 @@ namespace fox::imgui
 		}
 	}
 
-	void console_window::process_text()
+	void console_window::apply_search()
 	{
-		auto max_width = frame_state_.text_region_clip.GetWidth();
+		if (frame_state_.search_apply == false)
+			return;
+
+		search_found_.clear();
+
+		// Don't search if search input is empty
+		if (std::strlen(std::data(search_input_)) == 0)
+			return;
+
+		// Visible segments
+		apply_search_segment_range(frame_state_.visible_row_min, frame_state_.visible_row_max);
+
+		// Search inside visible range first
+		if (frame_state_.search_center_view && std::empty(search_found_)) // Nothing found and we need to recenter the view
+		{
+			frame_state_.search_next = true;
+		}
+
+		std::ptrdiff_t search_segment_start = frame_state_.visible_row_min;
+		if(!std::empty(search_selected_))
+		{
+			search_segment_start = find_segment_from_pointer(std::data(search_selected_));
+		}
+
+		for (int r = 0; r < 2; ++r)
+		{
+			bool towards_top = true;
+			bool circle = false;
+			if (frame_state_.search_next)
+			{
+				towards_top = true;
+				circle = false;
+				search_found_.clear();
+				auto i = (r == 0 ? search_segment_start : search_segment_start + 1); 
+				while (i + 1 < std::ssize(segments_) && std::empty(search_found_))
+				{
+					apply_search_segment_range(i, i + 2);
+					i = i + 1;
+				}
+
+				if (i < std::ssize(segments_) && std::empty(search_found_))
+				{
+					apply_search_segment_range(i, i + 1);
+					i = i + 1;
+				}
+
+				if (i >= std::ssize(segments_) && std::empty(search_found_))
+				{
+					circle = true;
+
+					i = 0;
+					while (i + 1 <= search_segment_start && std::empty(search_found_))
+					{
+						apply_search_segment_range(i, i + 2);
+						i = i + 1;
+					}
+				}
+			}
+			else if (frame_state_.search_previous)
+			{
+				towards_top = false;
+				circle = false;
+				search_found_.clear();
+				auto i = (r == 0 ? search_segment_start : search_segment_start - 1);
+				while (i - 1 >= 0 && std::empty(search_found_))
+				{
+					apply_search_segment_range(i - 1, i + 1);
+					i = i - 1;
+				}
+
+				if (i >= 0 && std::empty(search_found_))
+				{
+					apply_search_segment_range(i, i + 1);
+					i = i - 1;
+				}
+
+				if (i < 0 && std::empty(search_found_))
+				{
+					circle = true;
+
+					i = std::ssize(segments_) - 1;
+					while (i - 1 >= search_segment_start && std::empty(search_found_))
+					{
+						apply_search_segment_range(i - 1, i + 1);
+						i = i - 1;
+					}
+				}
+			}
+
+			if (!std::empty(search_found_) && (frame_state_.search_previous || frame_state_.search_next))
+			{
+				const auto r = std::find_if(std::begin(search_found_), std::end(search_found_), [&](std::string_view sv) -> bool { return std::data(sv) == std::data(search_selected_); });
+				if(r == std::end(search_found_) && towards_top)
+				{
+					search_selected_ = search_found_.front();
+				}
+				else if (r == std::end(search_found_) && towards_top == false)
+				{
+					search_selected_ = search_found_.back();
+				}
+				else if(r + 1 != std::end(search_found_) && towards_top && circle == false)
+				{
+					search_selected_ = *(r + 1);
+				}
+				else if(r != std::end(search_found_) && towards_top && circle == true)
+				{
+					search_selected_ = search_found_.front();
+				}
+				else if(r != std::begin(search_found_) && towards_top == false && circle == false)
+				{
+					search_selected_ = *(r - 1);
+				}
+				else if (r != std::end(search_found_) && towards_top == false && circle == true)
+				{
+					search_selected_ = search_found_.back();
+				}
+				else
+				{
+					continue;
+				}
+
+				const auto search_segment = find_segment_from_pointer(std::data(search_selected_));
+
+				if (search_segment < std::ssize(segments_) && 
+					(search_segment < frame_state_.visible_row_min || search_segment > frame_state_.visible_row_max) // scroll only if outside visible range
+					)
+				{
+					frame_state_.scroll_next_frame = static_cast<float>(search_segment) / static_cast<float>(std::ssize(segments_));
+				}
+
+			}
+			break;
+		}
+	}
+
+	void console_window::apply_search_segment_range(std::ptrdiff_t segment_start, std::ptrdiff_t segment_end)
+	{
+		// Join strings not separated by new line / color
+		std::ptrdiff_t i = segment_start;
+		std::ptrdiff_t j = 0;
+		std::regex regex;
+
+		// build regex
+		if (search_regex_) // TODO: Move this to where the search string is set
+		{
+			std::string regex_string = std::string("(") + std::data(search_input_) + ")";
+			regex = std::regex(regex_string, std::regex::flag_type::basic | std::regex::flag_type::optimize | (search_match_casing_ ? std::regex::flag_type{} : std::regex::flag_type::icase));
+		}
+
+		while (i < segment_end)
+		{
+			if (j >= std::ssize(segments_[i]) || std::empty(segments_[i][j].string))
+			{
+				i = i + 1;
+				j = 0;
+				continue;
+			}
+
+			const char* start = std::addressof(segments_[i][j].string.front());
+			const char* end = std::addressof(segments_[i][j].string.back());
+
+			j = j + 1;
+
+			while (i < segment_end)
+			{
+				if (j >= std::ssize(segments_[i]) || std::empty(segments_[i][j].string))
+				{
+					i = i + 1;
+					j = 0;
+					continue;
+				}
+
+				if (std::addressof(segments_[i][j].string.front()) != end)
+				{
+					break;
+				}
+
+				end = std::addressof(segments_[i][j].string.back());
+			}
+
+			// Perform search inside our string
+			const auto og_start = start;
+			while (start < end)
+			{
+				if (search_regex_)
+				{
+					using namespace std::regex_constants;
+
+					// We only start searching if it starts with whitespace
+					match_flag_type match_flag{};
+					if (search_whole_word_)
+					{
+						match_flag = format_first_only;
+
+						// Find space
+						if (og_start != start)
+						{
+							while (start < end && !std::isspace(*(start - 1)))
+								start++;
+
+							if (start == end)
+								break;
+						}
+					}
+
+					std::cmatch result;
+					if (std::regex_search(start, end, result, regex,
+						match_not_bol | match_not_eol | match_not_bow | match_not_eow | match_not_null | match_flag))
+					{
+						const char* found_start = std::begin(result)->first;
+						const char* found_end = std::begin(result)->second;
+
+						if (search_whole_word_)
+						{
+							if (
+								(start != found_start && !std::isspace(*(found_start - 1))) ||
+								(end != found_end) && !std::isspace(*found_end))
+							{
+								start = start + 1; // Search next
+								break;
+							}
+						}
+
+						search_found_.emplace_back(start, end);
+						start = end; // Search next
+					}
+					else
+					{
+						break; // Nothing to be found
+					}
+				}
+				else if (search_whole_word_)
+				{
+					// Find space
+					if (og_start != start)
+					{
+						while (start < end && !std::isspace(*(start - 1)))
+							start++;
+
+						if (start == end)
+							break;
+					}
+
+					std::string_view sv(start, end);
+
+					if (!sv.starts_with(std::data(search_input_)))
+					{
+						start = start + 1;
+						continue;
+					}
+					else
+					{
+						auto ee = start + std::strlen(std::data(search_input_));
+						search_found_.emplace_back(start, ee);
+						start = ee;
+					}
+				}
+				else
+				{
+					std::string_view sv(start, end);
+					const auto p = sv.find(std::data(search_input_));
+
+					if (p == std::string_view::npos)
+						break;
+
+					start = start + p;
+					auto ee = start + std::strlen(std::data(search_input_));
+					search_found_.emplace_back(start, ee);
+					start = ee;
+				}
+			}
+		}
+	}
+
+	struct segment_pointer_comp
+	{
+		[[nodiscard]] bool operator()(const std::vector<console_window::segment>& lhs, const char* rhs) const
+		{
+			assert(!std::empty(lhs));
+			assert(rhs);
+
+			return std::data(lhs.front().string) < rhs;
+		}
+
+		[[nodiscard]] bool operator()(const char* lhs, const std::vector<console_window::segment>& rhs) const
+		{
+			assert(!std::empty(rhs));
+			assert(lhs);
+
+			return lhs < std::data(rhs.front().string);
+		}
+	};
+
+	std::ptrdiff_t console_window::find_segment_from_pointer(const char* str)
+	{
+		// Binary search the segments pointer wise, they are always in order
+		const auto r = std::upper_bound(
+			std::begin(segments_),
+			std::end(segments_),
+			str,
+			segment_pointer_comp{}
+		);
+
+		return std::distance(std::begin(segments_), r - 1);
+	}
+
+	void console_window::draw_text_process_text()
+	{
+		ImRect text_region_clip(frame_state_.text_region_clip_min, frame_state_.text_region_clip_max);
+
+		auto max_width = text_region_clip.GetWidth();
 
 		constexpr std::string_view separateros{ "\n\t .,;?!" }; // TODO: Complete this list
 		constexpr std::string_view spaces{ "\n\t " };
