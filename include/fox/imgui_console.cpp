@@ -59,6 +59,11 @@ namespace fox::imgui
 		return nullptr;
 	}
 
+	console_window::console_window(std::move_only_function<void(console_window*, std::string_view)>&& execute_callback)
+		: config_({.execute_callback = std::move(execute_callback)})
+	{
+	}
+
 	void console_window::draw(bool* open)
 	{
 		frame_state_.clear();
@@ -86,33 +91,100 @@ namespace fox::imgui
 
 		ImGui::Separator();
 
-		auto callback = [](ImGuiInputTextCallbackData*) -> int
-			{
-				return 0;
-			};
-
 		// Command-line
-		bool reclaim_focus = false;
+		const float execute_button_width = ImGui::CalcTextSize("Submit").x + ImGui::GetStyle().FramePadding.x * 2;
+		const float execute_text_width = ImGui::GetContentRegionAvail().x - execute_button_width - ImGui::GetStyle().ItemSpacing.x;
+
+		ImGui::SetNextItemWidth(execute_text_width);
+
 		ImGuiInputTextFlags input_text_flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_EscapeClearsAll | ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_CallbackHistory;
-		if (ImGui::InputText("Input", std::data(input_buffer_), std::size(input_buffer_), input_text_flags, static_cast<ImGuiInputTextCallback>(callback), nullptr))
+		if (ImGui::InputText("##execute_input", std::data(execute_input_buffer_), std::size(execute_input_buffer_), input_text_flags, 
+			[](ImGuiInputTextCallbackData* data) -> int { return static_cast<console_window*>(data->UserData)->input_text_command(data); },
+			static_cast<void*>(this)
+			))
 		{
-			// Execute command
-			[[maybe_unused]] char* s = std::data(input_buffer_);
-			reclaim_focus = true;
+			input_text_command_execute();
+			frame_state_.execute_input_reclaim_focus = true;
 		}
 
 		// Auto-focus on window apparition
 		ImGui::SetItemDefaultFocus();
-		if (reclaim_focus)
+		if (frame_state_.execute_input_reclaim_focus)
+		{
 			ImGui::SetKeyboardFocusHere(-1); // Auto focus previous widget
+			frame_state_.execute_input_reclaim_focus = false;
+		}
+
+		ImGui::SameLine();
+
+		if(ImGui::Button("Submit##execute_button", ImVec2(execute_button_width, 0)))
+		{
+			input_text_command_execute();
+			frame_state_.execute_input_reclaim_focus = true;
+		}
 
 		draw_search_popup();
 
-		apply_search();
+		if(frame_state_.process_text == false) // Text probably changed and needs to be reprocessed
+		{
+			apply_search();
+		}
 
 		ImGui::End();
 
 		(void)open;
+	}
+
+	void console_window::clear()
+	{
+		this->buffer_.clear();
+		frame_state_.process_text = true;
+	}
+
+	void console_window::push_back(std::string_view sv)
+	{
+		buffer_.append(sv);
+		frame_state_.process_text = true;
+	}
+
+	void console_window::rebuild_buffer()
+	{
+		frame_state_.process_text = true;
+	}
+
+	std::string& console_window::buffer() noexcept
+	{
+		return buffer_;
+	}
+
+	const std::string& console_window::buffer() const noexcept
+	{
+		return buffer_;
+	}
+
+	void console_window::input_text_command_execute()
+	{
+		if (static_cast<bool>(config_.execute_callback))
+		{
+			config_.execute_callback(this, std::data(execute_input_buffer_));
+		}
+		std::memset(std::data(execute_input_buffer_), '\0', std::size(execute_input_buffer_));
+	}
+
+	int console_window::input_text_search(ImGuiInputTextCallbackData* data)
+	{
+		if ((data->EventFlag & ImGuiInputTextFlags_CallbackEdit) == 0)
+			return 0;
+
+		this->frame_state_.search_apply = true;
+		this->frame_state_.search_center_view = true;
+
+		return 0;
+	}
+
+	int console_window::input_text_command(ImGuiInputTextCallbackData* data)
+	{
+		return 0;
 	}
 
 	void console_window::draw_menus()
@@ -129,11 +201,13 @@ namespace fox::imgui
 				if (ImGui::MenuItem("Find", "CTRL+F"))
 				{
 					search_draw_popup_ = true;
+					search_selected_ = {}; // Remove selected
 				}
 
 				if (ImGui::MenuItem("Select All", "CTRL+A"))
 				{
-
+					selection_start_ = std::data(buffer_);
+					selection_end_ = std::data(buffer_) + std::size(buffer_);
 				}
 
 				if (ImGui::MenuItem("Copy", "CTRL+C"))
@@ -155,12 +229,12 @@ namespace fox::imgui
 
 				if (ImGui::Checkbox("Wrap", std::addressof(word_wrapping_)))
 				{
-
+					frame_state_.process_text = true;
 				}
 
 				if (ImGui::MenuItem("Clear"))
 				{
-
+					this->clear();
 				}
 
 				ImGui::EndMenu();
@@ -221,7 +295,12 @@ namespace fox::imgui
 
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(static_cast<float>(text_size));
-		ImGui::InputText("##Search Box", std::data(search_input_), std::size(search_input_));
+		ImGui::InputText("##Search Box", std::data(search_input_buffer_), std::size(search_input_buffer_),
+			ImGuiInputTextFlags_None | ImGuiInputTextFlags_CallbackEdit,
+			[](ImGuiInputTextCallbackData* data) -> int { return static_cast<console_window*>(data->UserData)->input_text_search(data); },
+			static_cast<void*>(this)
+			);
+
 		ImGui::SameLine();
 		if (ImGui::ArrowButton("FindPrev", ImGuiDir_Up))
 		{
@@ -252,10 +331,6 @@ namespace fox::imgui
 		ImGui::EndChild();
 	}
 
-	void console_window::draw_search_popup_properties()
-	{
-	}
-
 	void console_window::draw_text_region(float footer_height_to_reserve)
 	{
 		if (!ImGui::BeginChild("ScrollingRegion", ImVec2(0, -footer_height_to_reserve), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_HorizontalScrollbar))
@@ -270,7 +345,7 @@ namespace fox::imgui
 		frame_state_.text_region_clip_min = ImGui::GetCursorScreenPos() + scroll;
 		frame_state_.text_region_clip_max = ImGui::GetCursorScreenPos() + ImGui::GetContentRegionAvail() + scroll;
 		ImRect text_region_clip(frame_state_.text_region_clip_min, frame_state_.text_region_clip_max);
-		ImGui::GetWindowDrawList()->AddRect(text_region_clip.Min, text_region_clip.Max, ImGui::ColorConvertFloat4ToU32(ImVec4{ 1.f, 1.f, 0.f, 1.f }));
+		// ImGui::GetWindowDrawList()->AddRect(text_region_clip.Min, text_region_clip.Max, ImGui::ColorConvertFloat4ToU32(ImVec4{ 1.f, 1.f, 0.f, 1.f }));
 
 		if (text_region_clip.Contains(ImGui::GetMousePos()) && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::GetCurrentContext()->ActiveId == id)
 		{
@@ -283,9 +358,31 @@ namespace fox::imgui
 			ImGui::SetScrollY(ImGui::GetScrollMaxY() * frame_state_.scroll_this_frame);
 		}
 
+		if (auto [x, y] = ImGui::GetWindowSize(); frame_state_.last_size_x != x || frame_state_.last_size_y != y)
+		{
+			frame_state_.last_size_x = x;
+			frame_state_.last_size_y = y;
+			frame_state_.process_text = true;
+		}
+
 		// These two require frame_state_.text_region_clip to be processed
-		draw_text_process_text();
+		if(frame_state_.process_text)
+		{
+			draw_text_process_text();
+			frame_state_.process_text = false;
+		}
 		draw_text_autoscroll();
+
+		if (auto this_scroll = ImGui::GetScrollX(); frame_state_.last_scroll_x != this_scroll)
+		{
+			frame_state_.last_scroll_x = this_scroll;
+		}
+		
+		if(auto this_scroll = ImGui::GetScrollY(); frame_state_.last_scroll_y != this_scroll)
+		{
+			frame_state_.search_apply = true;
+			frame_state_.last_scroll_y = this_scroll;
+		}
 
 		bool ScrollToBottom = false;
 		bool AutoScroll = false;
@@ -320,6 +417,12 @@ namespace fox::imgui
 			}
 		}
 
+		// Edge case if there are no rendered rows
+		if(frame_state_.visible_row_min == std::numeric_limits<int>::max())
+		{
+			frame_state_.visible_row_min = 0;
+			frame_state_.visible_row_max = 0;
+		}
 
 		// Keep up at the bottom of the scroll region if we were already at the bottom at the beginning of the frame.
 		// Using a scrollbar or mouse-wheel will take away from the bottom edge.
@@ -390,16 +493,19 @@ namespace fox::imgui
 
 		draw_selection(ImGui::GetColorU32(ImGuiCol_TextSelectedBg, 0.6f), beg, end, selection_start_, selection_end_, pos, size);
 
-		auto found_color = ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 1.f, 0.6f));
-		for(const auto& found : search_found_)
+		if(search_draw_popup_ == true)
 		{
-			if (found == search_selected_)
-				continue;
+			auto found_color = ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 1.f, 0.6f));
+			for (const auto& found : search_found_)
+			{
+				if (std::data(found) == std::data(search_selected_)) // compare locations
+					continue;
 
-			draw_selection(found_color, beg, end, std::data(found), std::data(found) + std::size(found), pos, size);
+				draw_selection(found_color, beg, end, std::data(found), std::data(found) + std::size(found), pos, size);
+			}
+
+			draw_selection(ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 0.f, 0.6f)), beg, end, std::data(search_selected_), std::data(search_selected_) + std::size(search_selected_), pos, size);
 		}
-
-		draw_selection(ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 0.f, 0.6f)), beg, end, std::data(search_selected_), std::data(search_selected_) + std::size(search_selected_), pos, size);
 	}
 
 	void console_window::draw_selection(ImU32 bg_color, const char* beg, const char* end, const char* sel_beg, const char* sel_end, ImVec2 pos, ImVec2 size)
@@ -613,13 +719,13 @@ namespace fox::imgui
 
 	void console_window::apply_search()
 	{
-		if (frame_state_.search_apply == false)
+		if (search_draw_popup_ == false || frame_state_.search_apply == false)
 			return;
 
 		search_found_.clear();
 
 		// Don't search if search input is empty
-		if (std::strlen(std::data(search_input_)) == 0)
+		if (std::strlen(std::data(search_input_buffer_)) == 0)
 			return;
 
 		// Visible segments
@@ -743,6 +849,20 @@ namespace fox::imgui
 					frame_state_.scroll_next_frame = static_cast<float>(search_segment) / static_cast<float>(std::ssize(segments_));
 				}
 
+
+				search_found_.clear();
+
+				if(frame_state_.scroll_next_frame < 0.f)
+				{
+					apply_search_segment_range(frame_state_.visible_row_min, frame_state_.visible_row_max);
+				}
+				else
+				{
+					const auto num_visible = frame_state_.visible_row_max - frame_state_.visible_row_min;
+					const auto new_start = static_cast<std::ptrdiff_t>(frame_state_.scroll_next_frame * static_cast<float>(std::ssize(segments_) - num_visible));
+					auto new_end = std::min(std::ssize(segments_), new_start + num_visible + 1);
+					apply_search_segment_range(new_start, new_end);
+				}
 			}
 			break;
 		}
@@ -750,6 +870,9 @@ namespace fox::imgui
 
 	void console_window::apply_search_segment_range(std::ptrdiff_t segment_start, std::ptrdiff_t segment_end)
 	{
+		segment_start = std::clamp(segment_start, static_cast<std::ptrdiff_t>(0), std::ssize(segments_));
+		segment_end = std::clamp(segment_end, static_cast<std::ptrdiff_t>(0), std::ssize(segments_));
+
 		// Join strings not separated by new line / color
 		std::ptrdiff_t i = segment_start;
 		std::ptrdiff_t j = 0;
@@ -758,7 +881,7 @@ namespace fox::imgui
 		// build regex
 		if (search_regex_) // TODO: Move this to where the search string is set
 		{
-			std::string regex_string = std::string("(") + std::data(search_input_) + ")";
+			std::string regex_string = std::string("(") + std::data(search_input_buffer_) + ")";
 			regex = std::regex(regex_string, std::regex::flag_type::basic | std::regex::flag_type::optimize | (search_match_casing_ ? std::regex::flag_type{} : std::regex::flag_type::icase));
 		}
 
@@ -858,14 +981,14 @@ namespace fox::imgui
 
 					std::string_view sv(start, end);
 
-					if (!sv.starts_with(std::data(search_input_)))
+					if (!sv.starts_with(std::data(search_input_buffer_)))
 					{
 						start = start + 1;
 						continue;
 					}
 					else
 					{
-						auto ee = start + std::strlen(std::data(search_input_));
+						auto ee = start + std::strlen(std::data(search_input_buffer_));
 						search_found_.emplace_back(start, ee);
 						start = ee;
 					}
@@ -873,13 +996,13 @@ namespace fox::imgui
 				else
 				{
 					std::string_view sv(start, end);
-					const auto p = sv.find(std::data(search_input_));
+					const auto p = sv.find(std::data(search_input_buffer_));
 
 					if (p == std::string_view::npos)
 						break;
 
 					start = start + p;
-					auto ee = start + std::strlen(std::data(search_input_));
+					auto ee = start + std::strlen(std::data(search_input_buffer_));
 					search_found_.emplace_back(start, ee);
 					start = ee;
 				}
@@ -921,6 +1044,8 @@ namespace fox::imgui
 
 	void console_window::draw_text_process_text()
 	{
+		frame_state_.search_apply = true;
+
 		ImRect text_region_clip(frame_state_.text_region_clip_min, frame_state_.text_region_clip_max);
 
 		auto max_width = text_region_clip.GetWidth();
