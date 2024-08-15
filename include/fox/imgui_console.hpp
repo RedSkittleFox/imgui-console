@@ -15,12 +15,19 @@ namespace fox::imgui
 {
     class console_window
     {
+        static std::string default_prediction_insert_callback(console_window* console, std::string_view text, std::string_view selected_prediction);
+
+    private:
         friend struct segment_pointer_comp;
 
         struct config
         {
             const char* window_name = "Console Window";
             std::move_only_function<void(console_window*, std::string_view)> execute_callback;
+            std::move_only_function<void(console_window*, std::string_view, std::vector<std::string>&)> prediction_callback;
+            std::move_only_function<std::string(console_window*, std::string_view, std::string_view)> prediction_insert_callback = &console_window::default_prediction_insert_callback;
+            std::ptrdiff_t predictions_count = 5;
+
         } config_;
 
         struct frame_state
@@ -114,9 +121,13 @@ namespace fox::imgui
         std::string_view search_selected_;
         std::vector<char> search_input_buffer_ = std::vector<char>(64, '\0');
 
+        std::vector<std::string> predictions_;
+        int selected_prediction_ = -1;
+
     public:
         console_window(
-            std::move_only_function<void(console_window*, std::string_view)>&& execute_callback = {}
+            std::move_only_function<void(console_window*, std::string_view)>&& execute_callback = {},
+            std::move_only_function<void(console_window*, std::string_view, std::vector<std::string>&)>&& prediction_callback = {}
         );
 
         void draw(bool* open);
@@ -134,6 +145,7 @@ namespace fox::imgui
     private:
         void draw_menus();
         void draw_search_popup();
+        void draw_suggestions();
 
         void draw_text_region(float footer_height_to_reserve);
         void draw_text_subsegment(std::ptrdiff_t segment, std::ptrdiff_t subsegment);

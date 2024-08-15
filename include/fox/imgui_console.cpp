@@ -59,8 +59,40 @@ namespace fox::imgui
 		return nullptr;
 	}
 
-	console_window::console_window(std::move_only_function<void(console_window*, std::string_view)>&& execute_callback)
-		: config_({.execute_callback = std::move(execute_callback)})
+	std::string console_window::default_prediction_insert_callback(console_window* console, std::string_view text, std::string_view selected_prediction)
+	{
+		auto last = text.find_last_of(" \n\t");
+		std::string_view word = text;
+		if (last != std::string_view::npos)
+		{
+			word = text.substr(last + 1);
+		}
+
+		if (auto start = word.find_first_not_of(" \n\t"); start != std::string_view::npos)
+			word = word.substr(start);
+
+		if (auto end = word.find_last_not_of(" \n\t"); end != std::string_view::npos)
+			word = word.substr(0, end + 1);
+
+		if (selected_prediction.starts_with(word))
+		{
+			return static_cast<std::string>(selected_prediction.substr(std::size(word))) + " ";
+		}
+		else
+		{
+			return static_cast<std::string>(selected_prediction) + " ";
+		}
+	}
+
+	console_window::console_window(
+		std::move_only_function<void(console_window*, std::string_view)>&& execute_callback, 
+		std::move_only_function<void(console_window*, std::string_view, std::vector<std::string>&)>&& prediction_callback)
+		: config_(
+			{
+				.execute_callback = std::move(execute_callback),
+				.prediction_callback = std::move(prediction_callback)
+			}
+		)
 	{
 	}
 
@@ -97,7 +129,7 @@ namespace fox::imgui
 
 		ImGui::SetNextItemWidth(execute_text_width);
 
-		ImGuiInputTextFlags input_text_flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_EscapeClearsAll | ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_CallbackHistory;
+		ImGuiInputTextFlags input_text_flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_EscapeClearsAll | ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_CallbackEdit | ImGuiInputTextFlags_CallbackHistory;
 		if (ImGui::InputText("##execute_input", std::data(execute_input_buffer_), std::size(execute_input_buffer_), input_text_flags, 
 			[](ImGuiInputTextCallbackData* data) -> int { return static_cast<console_window*>(data->UserData)->input_text_command(data); },
 			static_cast<void*>(this)
@@ -123,12 +155,15 @@ namespace fox::imgui
 			frame_state_.execute_input_reclaim_focus = true;
 		}
 
+		draw_suggestions();
+
 		draw_search_popup();
 
 		if(frame_state_.process_text == false) // Text probably changed and needs to be reprocessed
 		{
 			apply_search();
 		}
+
 
 		ImGui::End();
 
@@ -168,6 +203,7 @@ namespace fox::imgui
 		{
 			config_.execute_callback(this, std::data(execute_input_buffer_));
 		}
+
 		std::memset(std::data(execute_input_buffer_), '\0', std::size(execute_input_buffer_));
 	}
 
@@ -184,6 +220,48 @@ namespace fox::imgui
 
 	int console_window::input_text_command(ImGuiInputTextCallbackData* data)
 	{
+		std::string_view buf(data->Buf, data->BufTextLen);
+
+		if(data->EventFlag & ImGuiInputTextFlags_CallbackEdit)
+		{
+			selected_prediction_ = -1;
+			config_.prediction_callback(this, buf, predictions_);
+		}
+		else if(data->EventFlag & ImGuiInputTextFlags_CallbackCompletion)
+		{
+			std::ptrdiff_t prediction_index = -1;
+			if(selected_prediction_ >= 0 && selected_prediction_ < std::ssize(predictions_))
+			{
+				prediction_index = selected_prediction_;
+			}
+			else if(!std::empty(predictions_))
+			{
+				prediction_index = 0;
+			}
+
+			if(prediction_index != -1)
+			{
+				data->InsertChars(data->BufTextLen, config_.prediction_insert_callback(this, buf, predictions_[prediction_index]).c_str());
+				selected_prediction_ = -1;
+				config_.prediction_callback(this, std::string_view(data->Buf, data->BufTextLen), predictions_);
+			}
+		}
+		else if((data->EventFlag & ImGuiInputTextFlags_CallbackHistory) && !std::empty(buf) && !std::empty(predictions_))
+		{
+			if(data->EventKey == ImGuiKey_UpArrow)
+			{
+				selected_prediction_ = std::clamp(selected_prediction_ - 1, 0, static_cast<int>(std::ssize(predictions_) - 1));
+			}
+			else if (data->EventKey == ImGuiKey_DownArrow)
+			{
+				selected_prediction_ = std::clamp(selected_prediction_ + 1, 0, static_cast<int>(std::ssize(predictions_) - 1));
+			}
+		}
+		else if((data->EventFlag & ImGuiInputTextFlags_CallbackHistory) && std::empty(buf))
+		{
+			// TODO: History
+		}
+
 		return 0;
 	}
 
@@ -276,7 +354,7 @@ namespace fox::imgui
 		{
 			frame_state_.disable_selection_next_frame = true;
 		}
-
+		
 		// Draw black background (default is transparent)
 		{
 			auto bg_color = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
@@ -329,6 +407,88 @@ namespace fox::imgui
 		}
 
 		ImGui::EndChild();
+	}
+
+	void console_window::draw_suggestions()
+	{
+		if (!ImGui::IsWindowFocused())
+			return;
+
+		if (std::empty(predictions_))
+			return;
+
+		auto suggestion_location = ImGui::GetWindowPos() + ImVec2(ImGui::GetStyle().ItemSpacing.x, ImGui::GetWindowHeight());
+		std::string_view sv_input(std::data(execute_input_buffer_));
+
+		auto r = std::find_if(std::rbegin(sv_input), std::rend(sv_input), [](char c) -> bool {return std::isspace(c); });
+		if(r != std::rend(sv_input))
+		{
+			auto distance = std::distance(std::begin(sv_input), r.base());
+
+			float offset = 0.f;
+			if(distance != 0)
+			{
+				offset = ImGui::CalcTextSize(std::data(sv_input), std::data(sv_input) + distance).x;
+			}
+
+			suggestion_location.x += offset;
+		}
+
+
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1)); // Tighten spacing
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(1.f, 1.f));
+		// Calculate the size
+
+		const auto count = std::min(std::ssize(predictions_), config_.predictions_count);
+
+		auto test = ImGui::GetStyle().WindowPadding.y * 2;
+		auto t2 = ImGui::GetTextLineHeight();
+		float height = ImGui::GetStyle().WindowPadding.y * 2 + ImGui::GetStyle().ItemSpacing.y * (count - 1) + ImGui::GetTextLineHeight() * count;
+		float width = 0.f;
+		for(std::ptrdiff_t i = {}; i < count; ++i)
+		{
+			width = std::max(width, ImGui::CalcTextSize(predictions_[i].c_str()).x);
+		}
+		width += ImGui::GetStyle().WindowPadding.x * 2;
+
+		const auto suggestion_size = ImVec2(width, height);
+		const auto suggestion_rect = ImRect(suggestion_location, suggestion_location + suggestion_size);
+
+		ImGui::SetNextWindowPos(suggestion_location, ImGuiCond_Always);
+		ImGui::SetNextWindowSize(suggestion_size, ImGuiCond_Always);
+
+		constexpr auto flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoFocusOnAppearing;
+		if (ImGui::Begin("search_popup", nullptr, flags))
+		{
+			// If mouse within window disable selection
+			if (suggestion_rect.Contains(frame_state_.mouse_pos))
+			{
+				frame_state_.disable_selection_next_frame = true;
+			}
+
+			// Draw black background (default is transparent)
+			{
+				auto bg_color = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+				ImGui::GetWindowDrawList()->AddRectFilled(suggestion_rect.Min, suggestion_rect.Max, ImGui::ColorConvertFloat4ToU32(bg_color));
+			}
+
+			for (int i = 0; i < std::ssize(predictions_); ++i)
+			{
+				if (i == selected_prediction_)
+				{
+					ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(ImGuiCol_TextSelectedBg));
+					ImGui::TextUnformatted(predictions_[i].c_str());
+					ImGui::PopStyleColor();
+					continue;
+				}
+
+				ImGui::TextUnformatted(predictions_[i].c_str());
+			}
+		}
+		ImGui::End();
+
+		ImGui::PopStyleVar(2);
+
 	}
 
 	void console_window::draw_text_region(float footer_height_to_reserve)
