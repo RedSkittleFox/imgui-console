@@ -1,0 +1,20 @@
+name: Build and Deploy ImGui Sample
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  pages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - uses: redskittlefox/imgui-sample@main
+      with:
+        cmake-target: console-sample-hello-console
+            

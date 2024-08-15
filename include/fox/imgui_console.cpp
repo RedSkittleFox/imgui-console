@@ -84,15 +84,13 @@ namespace fox::imgui
 		}
 	}
 
-	console_window::console_window(
-		std::move_only_function<void(console_window*, std::string_view)>&& execute_callback, 
-		std::move_only_function<void(console_window*, std::string_view, std::vector<std::string>&)>&& prediction_callback)
-		: config_(
-			{
-				.execute_callback = std::move(execute_callback),
-				.prediction_callback = std::move(prediction_callback)
-			}
-		)
+	void console_window::default_prediction_callback(console_window*, std::string_view, std::vector<std::string>&)
+	{
+
+	}
+
+	console_window::console_window(config cfg)
+		: config_(std::move(cfg))
 	{
 	}
 
@@ -101,7 +99,7 @@ namespace fox::imgui
 		frame_state_.clear();
 
 		ImGui::SetNextWindowSize(ImVec2(520, 600), ImGuiCond_FirstUseEver);
-		if (!ImGui::Begin(config_.window_name, open, ImGuiWindowFlags_MenuBar))
+		if (!ImGui::Begin(config_.window_name.c_str(), open, ImGuiWindowFlags_MenuBar))
 		{
 			ImGui::End();
 			return;
@@ -776,7 +774,7 @@ namespace fox::imgui
 				const auto mouse_pos = ImGui::GetMousePos();
 
 				// Narrow text clipping
-				ImGui::GetWindowDrawList()->AddRect(text_region_clip.Min, text_region_clip.Max, ImGui::ColorConvertFloat4ToU32(ImVec4{ 1.f, 0.f, 0.f, 1.f }));
+				// ImGui::GetWindowDrawList()->AddRect(text_region_clip.Min, text_region_clip.Max, ImGui::ColorConvertFloat4ToU32(ImVec4{ 1.f, 0.f, 0.f, 1.f }));
 
 				if (frame_state_.visible_row_min == 0 && text_region_clip.Min.y >= mouse_pos.y)
 				{

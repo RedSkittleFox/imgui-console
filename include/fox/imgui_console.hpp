@@ -16,19 +16,30 @@ namespace fox::imgui
     class console_window
     {
         static std::string default_prediction_insert_callback(console_window* console, std::string_view text, std::string_view selected_prediction);
-
-    private:
+        static void default_prediction_callback(console_window*, std::string_view, std::vector<std::string>&);
+    public:
         friend struct segment_pointer_comp;
+
+#ifdef __cpp_lib_move_only_function
+        template<class T>
+        using function_t = std::move_only_function<T>;
+#else
+        template<class T>
+        using function_t = std::function<T>;
+#endif
 
         struct config
         {
-            const char* window_name = "Console Window";
-            std::move_only_function<void(console_window*, std::string_view)> execute_callback;
-            std::move_only_function<void(console_window*, std::string_view, std::vector<std::string>&)> prediction_callback;
-            std::move_only_function<std::string(console_window*, std::string_view, std::string_view)> prediction_insert_callback = &console_window::default_prediction_insert_callback;
+            std::string window_name = "Console Window";
+            function_t<void(console_window*, std::string_view)> execute_callback;
+            function_t<void(console_window*, std::string_view, std::vector<std::string>&)> prediction_callback = &console_window::default_prediction_callback;
+            function_t<std::string(console_window*, std::string_view, std::string_view)> prediction_insert_callback = &console_window::default_prediction_insert_callback;
             std::ptrdiff_t predictions_count = 5;
+        };
 
-        } config_;
+    private:
+
+    	config config_;
 
         struct frame_state
         {
@@ -125,10 +136,7 @@ namespace fox::imgui
         int selected_prediction_ = -1;
 
     public:
-        console_window(
-            std::move_only_function<void(console_window*, std::string_view)>&& execute_callback = {},
-            std::move_only_function<void(console_window*, std::string_view, std::vector<std::string>&)>&& prediction_callback = {}
-        );
+        console_window(config cfg);
 
         void draw(bool* open);
         void clear();
