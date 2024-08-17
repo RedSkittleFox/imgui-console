@@ -1,3 +1,5 @@
+[![Build and Deploy ImGui Sample](https://github.com/RedSkittleFox/imgui-console/actions/workflows/deploy.yml/badge.svg)](https://github.com/RedSkittleFox/imgui-console/actions/workflows/deploy.yml)
+
 # imgui-console
 A fully fledged imgui console widget supporting:
 
