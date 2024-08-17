@@ -9,6 +9,8 @@ A fully fledged imgui console widget supporting:
 - searching
 - command predictions
 
+You can try it out live [here](https://redskittlefox.github.io/imgui-console/).
+
 https://github.com/user-attachments/assets/e5c0bfd2-0b2a-45ff-8122-2c5292eb1db7
 
 # Sample Usage
@@ -56,6 +58,10 @@ FetchContent_Declare(imgui_console GIT_REPOSITORY https://github.com/RedSkittleF
 FetchContent_MakeAvailable(imgui_console)
 target_link_libraries(foo PRIVATE fox::imgui_console)
 ```
+
+# Dependencies
+- [ocornut/imgui](https://github.com/ocornut/imgui)
+- [RedSkittleFox/imgui-sample](https://github.com/RedSkittleFox/imgui-sample)
 
 # License
 This library is licensed under the [MIT License](LICENSE).
